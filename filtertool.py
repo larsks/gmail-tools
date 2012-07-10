@@ -69,7 +69,6 @@ class Filter (configobj.ConfigObj):
 
     def xmlfilter (self, name, data):
         filterid = name.split(':', 1)[1]
-        filter = E.entry()
 
         propmaker = ElementMaker(namespace=NSMAP['apps'])
         properties = []
@@ -77,15 +76,13 @@ class Filter (configobj.ConfigObj):
             properties.append(propmaker.property(
                 name=k, value=v))
 
-        filter.append(E.entry(
+        return E.entry(
             E.category(term='filter'),
             E.title('Mail filter'),
             E.id('tag:mail.google.com,2008:filter:%s' % filterid),
             E.content(),
             *properties
-            ))
-
-        return filter
+            )
 
     def toini (self):
         buffer = StringIO()
