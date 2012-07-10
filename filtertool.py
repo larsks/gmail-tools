@@ -30,10 +30,10 @@ class Filter (configobj.ConfigObj):
                     }
 
         for filter in doc.findall('atom:entry', namespaces=NSMAP):
-            xmlid = filter.find('atom:id', namespaces=NSMAP).text
-            if not 'filter:' in xmlid:
+            if filter.find('atom:category', namespaces=NSMAP).get('term') != 'filter':
                 continue
 
+            xmlid = filter.find('atom:id', namespaces=NSMAP).text
             filterid = xmlid.split('filter:')[1]
             
             filterdict = {}
