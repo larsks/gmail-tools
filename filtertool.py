@@ -3,7 +3,8 @@
 import os
 import sys
 import argparse
-import configobj
+from configobj import ConfigObj
+from validate import Validator
 
 from StringIO import StringIO
 from lxml import etree
@@ -18,9 +19,27 @@ NSMAP = {
 class FilterError(Exception):
     pass
 
-class Filter (configobj.ConfigObj):
+class Filter (ConfigObj):
+    def __init__(self, *args, **kwargs):
+        if not 'indent_type' in kwargs:
+            kwargs['indent_type'] = '    '
+        if not 'configspec' in kwargs:
+            kwargs['configspec'] = 'filterspec.ini'
+        super(Filter, self).__init__(*args, **kwargs)
+
+        self._nextid = 0
+
+    @property
+    def nextid(self):
+        x = self._nextid
+        self._nextid += 1
+        return x
+
     def fromxml(self, source):
         doc = etree.parse(source)
+
+        self['filters']   = {}
+        self['responses'] = {}
 
         author = doc.find('atom:author', namespaces=NSMAP)
         if author is not None:
@@ -29,19 +48,41 @@ class Filter (configobj.ConfigObj):
                     'email': author.find('atom:email', namespaces=NSMAP).text.strip(),
                     }
 
-        for filter in doc.findall('atom:entry', namespaces=NSMAP):
-            if filter.find('atom:category', namespaces=NSMAP).get('term') != 'filter':
-                continue
+        for entry in doc.findall('atom:entry', namespaces=NSMAP):
+            category = entry.find('atom:category', namespaces=NSMAP).get('term')
 
-            xmlid = filter.find('atom:id', namespaces=NSMAP).text
-            filterid = xmlid.split('filter:')[1]
-            
-            filterdict = {}
+            id = entry.find('atom:id',
+                    namespaces=NSMAP).text.split(':')[-1]
 
-            for prop in filter.findall('apps:property', namespaces=NSMAP):
-                filterdict[prop.get('name')] = prop.get('value')
+            if category == 'filter':
+                filterdict = {}
 
-            self['filter:%s' % filterid] = filterdict
+                id = entry.find('atom:id',
+                        namespaces=NSMAP).text.split(':')[-1]
+
+                for prop in entry.findall('apps:property', namespaces=NSMAP):
+                    prop_name = prop.get('name')
+                    prop_val = prop.get('value')
+
+                    if prop_name == 'cannedResponse':
+                        prop_val = prop_val.split(':')[-1]
+                    elif prop_name == 'label':
+                        prop_val = [prop_val]
+
+                    filterdict[prop_name] = prop_val
+
+                self['filters'][id] = filterdict
+            elif category == 'cannedResponse':
+                responsedict = {}
+
+                title = entry.find('atom:title', namespaces=NSMAP).text
+                content = entry.find('atom:content', namespaces=NSMAP).text
+
+                self['responses'][title] = {
+                        'id': id,
+                        'title': title,
+                        'content': content,
+                        }
 
     def toxml (self):
         doc = etree.Element('feed', nsmap=NSMAP)
@@ -53,10 +94,7 @@ class Filter (configobj.ConfigObj):
                 E.email(self['author']['email']),
                 ))
 
-        for name,data in self.items():
-            if not name.startswith('filter:'):
-                continue
-
+        for name,data in self['filters'].items():
             if 'label' in data:
                 for label in data.as_list('label'):
                     tmpdata = dict(data)
@@ -65,11 +103,20 @@ class Filter (configobj.ConfigObj):
             else:
                 doc.append(self.xmlfilter(name, data))
 
+        for name, data in self['responses'].items():
+            doc.append(self.xmlresponse(name, data))
+
         return etree.tostring(doc, pretty_print=True)
 
-    def xmlfilter (self, name, data):
-        filterid = name.split(':', 1)[1]
+    def xmlresponse(self, name, data):
+        return E.entry(
+            E.category(term='cannedResponse'),
+            E.title(name),
+            E.id('tag:mail.google.com,2009:cannedResponse:%s' % self.nextid),
+            E.content(data['content'], type='text'),
+            )
 
+    def xmlfilter(self, name, data):
         propmaker = ElementMaker(namespace=NSMAP['apps'])
         properties = []
         for k,v in data.items():
@@ -79,7 +126,7 @@ class Filter (configobj.ConfigObj):
         return E.entry(
             E.category(term='filter'),
             E.title('Mail filter'),
-            E.id('tag:mail.google.com,2008:filter:%s' % filterid),
+            E.id('tag:mail.google.com,2008:filter:%s' % self.nextid),
             E.content(),
             *properties
             )
@@ -125,6 +172,12 @@ def main():
         filters = Filter(sys.stdin)
     else:
         raise FilterError('Unsupported input format.')
+
+    check = filters.validate(Validator())
+    if check is not True:
+        import pprint
+        pprint.pprint(check)
+        raise FilterError('validation failed')
 
     if opts.dest == 'xml':
         print filters.toxml()
