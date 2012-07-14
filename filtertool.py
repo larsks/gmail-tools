@@ -11,7 +11,6 @@ from lxml import etree
 from lxml.builder import E, ElementMaker
 
 NSMAP = {
-    None: 'http://www.w3.org/2005/Atom',
     'atom': 'http://www.w3.org/2005/Atom',
     'apps': 'http://schemas.google.com/apps/2006',
     }
@@ -27,14 +26,6 @@ class Filter (ConfigObj):
             kwargs['configspec'] = 'filterspec.ini'
         super(Filter, self).__init__(*args, **kwargs)
 
-        self._nextid = 0
-
-    @property
-    def nextid(self):
-        x = self._nextid
-        self._nextid += 1
-        return x
-
     def fromxml(self, source):
         doc = etree.parse(source)
 
@@ -48,41 +39,41 @@ class Filter (ConfigObj):
                     'email': author.find('atom:email', namespaces=NSMAP).text.strip(),
                     }
 
-        for entry in doc.findall('atom:entry', namespaces=NSMAP):
-            category = entry.find('atom:category', namespaces=NSMAP).get('term')
+        # Load cannedResponses
+        entries = doc.xpath('//atom:entry[atom:category/@term = "cannedResponse"]',
+                namespaces=NSMAP)
+        for entry in entries:
+            id = entry.find('atom:id', namespaces=NSMAP).text
+            title = entry.find('atom:title', namespaces=NSMAP).text
+            content = entry.find('atom:content', namespaces=NSMAP).text
 
-            id = entry.find('atom:id',
-                    namespaces=NSMAP).text.split(':')[-1]
+            self['responses'][id] = {
+                    'title': title,
+                    'content': content,
+                    }
 
-            if category == 'filter':
-                filterdict = {}
+        # Load filters
+        entries = doc.xpath('//atom:entry[atom:category/@term = "filter"]',
+                namespaces=NSMAP)
+        for entry in entries:
+            id = entry.find('atom:id', namespaces=NSMAP).text
+            filterdict = {}
 
-                id = entry.find('atom:id',
-                        namespaces=NSMAP).text.split(':')[-1]
+            for prop in entry.findall('apps:property', namespaces=NSMAP):
+                prop_name = prop.get('name')
+                prop_val = prop.get('value')
 
-                for prop in entry.findall('apps:property', namespaces=NSMAP):
-                    prop_name = prop.get('name')
-                    prop_val = prop.get('value')
+                if prop_name == 'cannedResponse':
+                    if not prop_val in self['responses']:
+                        raise FilterError(
+                                'undefined reference to canned response: %s' %
+                                prop_val)
+                elif prop_name == 'label':
+                    prop_val = [prop_val]
 
-                    if prop_name == 'cannedResponse':
-                        prop_val = prop_val.split(':')[-1]
-                    elif prop_name == 'label':
-                        prop_val = [prop_val]
+                filterdict[prop_name] = prop_val
 
-                    filterdict[prop_name] = prop_val
-
-                self['filters'][id] = filterdict
-            elif category == 'cannedResponse':
-                responsedict = {}
-
-                title = entry.find('atom:title', namespaces=NSMAP).text
-                content = entry.find('atom:content', namespaces=NSMAP).text
-
-                self['responses'][title] = {
-                        'id': id,
-                        'title': title,
-                        'content': content,
-                        }
+            self['filters'][id] = filterdict
 
     def toxml (self):
         doc = etree.Element('feed', nsmap=NSMAP)
@@ -95,24 +86,38 @@ class Filter (ConfigObj):
                 ))
 
         for name,data in self['filters'].items():
-            if 'label' in data:
+            if data.get('cannedResponse'):
+                if not data['cannedResponse'] in self['responses']:
+                    raise FilterError(
+                            'Undefined reference to canned response: %s' %
+                            data['cannedResponse'])
+                else:
+                    self['responses'][data['cannedResponse']]['__used__'] = True
+
+            if name == 'autoreply':
+                print >>sys.stderr, data
+
+            if data.get('label'):
                 for label in data.as_list('label'):
                     tmpdata = dict(data)
                     tmpdata['label'] = label
                     doc.append(self.xmlfilter(name, tmpdata))
             else:
-                doc.append(self.xmlfilter(name, data))
+                tmpdata = dict(data)
+                del tmpdata['label']
+                doc.append(self.xmlfilter(name, tmpdata))
 
         for name, data in self['responses'].items():
-            doc.append(self.xmlresponse(name, data))
+            if data.get('__used__', False):
+                doc.append(self.xmlresponse(name, data))
 
         return etree.tostring(doc, pretty_print=True)
 
     def xmlresponse(self, name, data):
         return E.entry(
             E.category(term='cannedResponse'),
-            E.title(name),
-            E.id('tag:mail.google.com,2009:cannedResponse:%s' % self.nextid),
+            E.title(data['title']),
+            E.id(name),
             E.content(data['content'], type='text'),
             )
 
@@ -120,13 +125,16 @@ class Filter (ConfigObj):
         propmaker = ElementMaker(namespace=NSMAP['apps'])
         properties = []
         for k,v in data.items():
+            if v is None:
+                continue
+
             properties.append(propmaker.property(
                 name=k, value=v))
 
         return E.entry(
             E.category(term='filter'),
             E.title('Mail filter'),
-            E.id('tag:mail.google.com,2008:filter:%s' % self.nextid),
+            E.id(name),
             E.content(),
             *properties
             )
@@ -171,7 +179,7 @@ def main():
     elif opts.source == 'ini':
         filters = Filter(sys.stdin)
     else:
-        raise FilterError('Unsupported input format.')
+        raise FilterError('unsupported input format.')
 
     check = filters.validate(Validator())
     if check is not True:
@@ -184,7 +192,7 @@ def main():
     elif opts.dest == 'ini':
         print filters.toini()
     else:
-        raise FilterError('Unsupported output format.')
+        raise FilterError('unsupported output format.')
 
 if __name__ == '__main__':
     sys.exit(main())
